@@ -17,12 +17,6 @@
 			{
 				"indexed": false,
 				"internalType": "address",
-				"name": "questioner",
-				"type": "address"
-			},
-			{
-				"indexed": false,
-				"internalType": "address",
 				"name": "replyTo",
 				"type": "address"
 			},
@@ -67,8 +61,26 @@
 			{
 				"indexed": false,
 				"internalType": "uint256",
-				"name": "",
+				"name": "id",
 				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "address",
+				"name": "replier",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "address",
+				"name": "replyTo",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "bytes4",
+				"name": "fn",
+				"type": "bytes4"
 			},
 			{
 				"indexed": false,
@@ -91,9 +103,33 @@
 			},
 			{
 				"indexed": false,
+				"internalType": "address",
+				"name": "replier",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "address",
+				"name": "replyTo",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "bytes4",
+				"name": "fn",
+				"type": "bytes4"
+			},
+			{
+				"indexed": false,
 				"internalType": "string",
 				"name": "errmsg",
 				"type": "string"
+			},
+			{
+				"indexed": false,
+				"internalType": "bytes",
+				"name": "payload",
+				"type": "bytes"
 			}
 		],
 		"name": "ReplyFailed",

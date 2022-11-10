@@ -783,9 +783,11 @@ dependencies = [
  "anyhow",
  "ethabi",
  "ethers",
+ "ethers-signers",
  "eyre",
  "hex",
  "reqwest",
+ "serde",
  "tokio",
 ]
 
