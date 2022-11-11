@@ -91,14 +91,18 @@ fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let wallet = MnemonicBuilder::<English>::default()
-        .phrase("aisle genuine false door mouse sustain caught flock pyramid sister scan disease")
+        //.phrase("aisle genuine false door mouse sustain caught flock pyramid sister scan disease")
+        .phrase("xxxxx")
         .build()?;
     println!("Wallet: {}", wallet.address());
     let provider =
-        Provider::<Ws>::connect("wss://goerli.infura.io/ws/v3/e5cbadfb7319409f981ee0231c256639")
+        //Provider::<Ws>::connect("wss://goerli.infura.io/ws/v3/e5cbadfb7319409f981ee0231c256639")
+        Provider::<Ws>::connect("wss://ws-matic-mainnet.chainstacklabs.com")
             .await?;
+    print!("Provider: {:#?}", provider);
     // let client = Arc::new(client);
-    let client = SignerMiddleware::new(provider, wallet.with_chain_id(5 as u64));
+    //let client = SignerMiddleware::new(provider, wallet.with_chain_id(5 as u64));
+    let client = SignerMiddleware::new(provider, wallet.with_chain_id(137 as u64));
     let client = Arc::new(client);
 
     let last_block = client
@@ -109,8 +113,8 @@ async fn main() -> Result<(), anyhow::Error> {
         .unwrap();
     println!("last_block: {}", last_block);
 
-    let filter = Filter::new().from_block(last_block - 5).address(
-        "0x8c29859d9589509a57A090716E1d7E700eF2DF8c"
+    let filter = Filter::new().from_block(35467636 - 1).address(
+        "0x7C963C6e754310CB2da119fAc2742BA0A70E5356"
             .parse::<Address>()
             .unwrap(),
     );
@@ -124,7 +128,13 @@ async fn main() -> Result<(), anyhow::Error> {
         .parse()
         .unwrap();
 
-    while let Some(log) = stream.next().await {
+    println!("listening for events...");
+    loop {
+        let log = stream.next().await;
+        if log.is_none() {
+            continue;
+        }
+        let log = log.unwrap();
         println!("log: {:#?}", log);
         //let f = decode_log(
         //    "./src/askv0.abi.json",
@@ -150,7 +160,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 //println!("mr: {}", mr);
                 // submit result
 
-                let addr = "0x8c29859d9589509a57A090716E1d7E700eF2DF8c"
+                let addr = "0x7C963C6e754310CB2da119fAc2742BA0A70E5356"
                     .parse::<Address>()
                     .unwrap();
 
@@ -173,15 +183,45 @@ async fn main() -> Result<(), anyhow::Error> {
                         return Ok(());
                     }
                 };
-                let data = ethabi::encode(&[ethabi::Token::Uint(U256::from(1))]);
+                let data = ethabi::encode(&[ethabi::Token::Uint(U256::from(2))]);
+                // let data = ethabi::Token::Bytes(data);
 
-                let contract = SimpleContract::new(addr, client.clone());
-                let r = contract
-                    .reply(U256::from(id), Bytes::from(data))
+                //let contract = SimpleContract::new(addr, client.clone());
+                //let r = contract
+                //    .reply(U256::from(id), Bytes::from(data))
+                //    .send()
+                //    .await?
+                //    .await?;
+                //println!("r: {:#?}", r);
+
+                let file = File::open("./src/askv0.abi.json")?;
+                let abi: ethers::abi::Abi = serde_json::from_reader(file)?;
+                let wallet_a = MnemonicBuilder::<English>::default()
+                //.phrase("aisle genuine false door mouse sustain caught flock pyramid sister scan disease")
+                .phrase("glory usage happy lamp nephew holiday fury private various evolve buddy junk")
+                .build()?;
+                let http_client = Provider::<Http>::try_from("https://polygon-rpc.com").unwrap();
+                let http_client =
+                    SignerMiddleware::new(http_client, wallet_a.with_chain_id(137 as u64));
+                let (base_fee, _) = http_client.estimate_eip1559_fees(None).await?;
+                // create the contract object at the address
+                let contract = ethers::contract::Contract::new(addr, abi, http_client);
+
+                // Non-constant methods are executed via the `send()` call on the method builder.
+                println!("Calling `reply`...");
+                let call = contract.method::<_, ()>("reply", (id, Bytes::from(data)))?;
+                let eg = call.estimate_gas().await?;
+                println!("eg: {}", eg);
+                let receipt = call
+                    .gas(1000000u64)
+                    .gas_price(base_fee * 2)
                     .send()
                     .await?
                     .await?;
-                println!("r: {:#?}", r);
+
+                // `await`ing on the pending transaction resolves to a transaction receipt
+                //let receipt = pending_tx.confirmations(6).await?;
+                println!("receipt: {:#?}", receipt);
             }
             "Replied" => {
                 println!("Replied");
