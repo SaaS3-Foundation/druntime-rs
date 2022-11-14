@@ -9,13 +9,28 @@ use ethabi::{
 use ethers::{
     abi::{AbiDecode, Tokenizable},
     prelude::*,
+    solc::resolver::print,
     utils::keccak256,
 };
 use ethers_signers::{coins_bip39::English, MnemonicBuilder};
 use eyre::Result;
-use std::env;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::{any, error::Error, fs::File};
+use std::{collections::HashMap, env};
+use structopt::StructOpt;
+
+// Scheduler, trait for .seconds(), .minutes(), etc., and trait with job scheduling methods
+use clokwerk::{AsyncScheduler, Job, TimeUnits};
+use std::time::Duration;
+
+// Define a struct called Opts
+#[derive(Debug, StructOpt)]
+struct Opts {
+    #[structopt(short = "c", long = "cfg", default_value = "dev.ini")]
+    cfg: PathBuf,
+}
 
 fn load_event(path: &str, name: &str) -> anyhow::Result<Event> {
     let file = File::open(path)?;
@@ -31,6 +46,13 @@ fn load_event(path: &str, name: &str) -> anyhow::Result<Event> {
     }
 }
 
+// exammple
+// let f = decode_log(
+//    "./src/askv0.abi.json",
+//    "Asked",
+//    log.topics,
+//    log.data.0.to_vec(),
+//);
 fn decode_log(
     path: &str,
     name: &str,
@@ -73,7 +95,6 @@ fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
         _ => anyhow::bail!("Invalid payload"),
     };
 
-    println!("Payload: {}", hex::encode(&b));
     let decoded_abi = ABI::decode_from_slice(&b, true).map_err(anyhow::Error::msg)?;
     let url_suffix = decoded_abi
         .params
@@ -82,27 +103,154 @@ fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
         .map(|param| param.get_name().to_string() + "=" + &param.get_value().to_string())
         .collect::<Vec<String>>()
         .join("&");
-    println!("{}", url_suffix);
 
     let url = "http://150.109.145.144:3301/saas3/web2/qatar2022/played?".to_string() + &url_suffix;
     Ok(url)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+struct Network {
+    http_provider: String,
+    ws_provider: String,
+    chain_id: u64,
+    oracle_addr: String,
+    block_offset: u64,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+struct Oracle {
+    abi: String,
+    signer: String,
+    interval: u32,
+}
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+struct Config {
+    title: String,
+    network: Network,
+    oracle: Oracle,
+}
+
+fn decode_askid(e: ethabi::Log) -> Result<U256, anyhow::Error> {
+    let id = e
+        .params
+        .iter()
+        .find(|p| p.name == "id")
+        .unwrap()
+        .value
+        .clone();
+    let id = match id {
+        Token::Uint(content) => content,
+        _ => {
+            println!("invalid ask id");
+            return Err(anyhow!("Invalid id"));
+        }
+    };
+    Ok(id)
+}
+
+fn format_event(e: &ethabi::Log) -> String {
+    e.params
+        .iter()
+        .map(|log_param| format!("{} {}", log_param.name, log_param.value))
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<(), anyhow::Error> {
+    // SUBMIT
+    let addr = cfg.network.oracle_addr.as_str().parse::<Address>().unwrap();
+    println!("submitting answer to oracle {}", addr);
+
+    let file = File::open("./src/askv0.abi.json")?;
+    let abi: ethers::abi::Abi = serde_json::from_reader(file)?;
+
     let wallet = MnemonicBuilder::<English>::default()
-        //.phrase("aisle genuine false door mouse sustain caught flock pyramid sister scan disease")
-        .phrase("xxxxx")
+        .phrase(cfg.oracle.signer.as_str())
+        .build()?;
+
+    let http_client = Provider::<Http>::try_from(&cfg.network.http_provider).unwrap();
+    let http_client =
+        SignerMiddleware::new(http_client, wallet.with_chain_id(cfg.network.chain_id));
+
+    let (base_fee, _) = http_client.estimate_eip1559_fees(None).await?;
+    println!("base fee: {}", base_fee);
+
+    // create the contract object at the address
+    let contract = ethers::contract::Contract::new(addr, abi, http_client);
+
+    // Non-constant methods are executed via the `send()` call on the method builder.
+    println!("Calling `reply`...");
+    let call = contract.method::<_, ()>("reply", (ask_id, Bytes::from(answer)))?;
+    //let eg = call.estimate_gas().await?;
+    //println!("eg: {}", eg);
+    println!("tx: {:?}", call.tx);
+    let receipt = call
+        .gas(1000000u64)
+        .gas_price(base_fee * 2)
+        .send()
+        .await?
+        .await?;
+
+    // `await`ing on the pending transaction resolves to a transaction receipt
+    //let receipt = pending_tx.confirmations(6).await?;
+    println!("receipt: {:#?}", receipt);
+
+    Ok(())
+}
+
+async fn handle_log(cfg: &Config, log: Log) -> Result<(), anyhow::Error> {
+    let (name, e) =
+        identify_event("./src/askv0.abi.json", log.topics, log.data.0.to_vec()).unwrap();
+    println!("Event: {} => \n{}", name, format_event(&e));
+
+    match name.as_str() {
+        "Asked" => {
+            let url = decode_url_params(&e).unwrap();
+            println!("url: {}", url);
+
+            // TODO
+            // do http request
+            //let mr: u32 = reqwest::get(url).await?.text().await?.parse().unwrap();
+            //println!("mr: {}", mr);
+
+            let ask_id = decode_askid(e).unwrap();
+            println!("ask_id: {}", ask_id);
+            // encode reply payload
+            let answer = ethabi::encode(&[ethabi::Token::Uint(U256::from(2))]);
+            submit_answer(cfg, ask_id, answer).await?;
+        }
+        "Replied" => {
+            println!("Replied");
+        }
+        "ReplyFailed" => {
+            println!(
+                "ReplyFailed: {}",
+                e.clone()
+                    .params
+                    .iter()
+                    .find(|p| p.name == "errmsg")
+                    .unwrap()
+                    .value
+                    .clone()
+            );
+        }
+        _ => {
+            println!("Unhandled event!");
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute(cfg: &Config) -> Result<(), anyhow::Error> {
+    let wallet = MnemonicBuilder::<English>::default()
+        .phrase(cfg.oracle.signer.as_str())
         .build()?;
     println!("Wallet: {}", wallet.address());
-    let provider =
-        //Provider::<Ws>::connect("wss://goerli.infura.io/ws/v3/e5cbadfb7319409f981ee0231c256639")
-        Provider::<Ws>::connect("wss://ws-matic-mainnet.chainstacklabs.com")
-            .await?;
-    print!("Provider: {:#?}", provider);
-    // let client = Arc::new(client);
-    //let client = SignerMiddleware::new(provider, wallet.with_chain_id(5 as u64));
-    let client = SignerMiddleware::new(provider, wallet.with_chain_id(137 as u64));
+
+    let provider = Provider::<Ws>::connect(cfg.network.ws_provider.as_str()).await?;
+
+    let client = SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
     let client = Arc::new(client);
 
     let last_block = client
@@ -111,137 +259,50 @@ async fn main() -> Result<(), anyhow::Error> {
         .unwrap()
         .number
         .unwrap();
+
     println!("last_block: {}", last_block);
+    let from_block = last_block - cfg.network.block_offset;
+    println!("from block: {}", from_block);
 
-    let filter = Filter::new().from_block(35467636 - 1).address(
-        "0x7C963C6e754310CB2da119fAc2742BA0A70E5356"
-            .parse::<Address>()
-            .unwrap(),
-    );
+    let filter = Filter::new()
+        .from_block(3172348)
+        .address(cfg.network.oracle_addr.as_str().parse::<Address>().unwrap());
+
+    println!("subscribing to events");
     let mut stream = client.subscribe_logs(&filter).await?;
-    println!("{:?}", env::current_dir());
-    load_event("./src/askv0.abi.json", "Asked").unwrap();
-    let s: String = reqwest::get("https://www.baidu.com")
-        .await?
-        .text()
-        .await?
-        .parse()
-        .unwrap();
 
-    println!("listening for events...");
-    loop {
-        let log = stream.next().await;
-        if log.is_none() {
-            continue;
-        }
-        let log = log.unwrap();
+    println!("fetching events...");
+    while let Some(log) = stream.next().await {
         println!("log: {:#?}", log);
-        //let f = decode_log(
-        //    "./src/askv0.abi.json",
-        //    "Asked",
-        //    log.topics,
-        //    log.data.0.to_vec(),
-        //);
-        let (name, f) =
-            identify_event("./src/askv0.abi.json", log.topics, log.data.0.to_vec()).unwrap();
-        let result = f
-            .clone()
-            .params
-            .into_iter()
-            .map(|log_param| format!("{} {}", log_param.name, log_param.value))
-            .collect::<Vec<String>>()
-            .join("\n");
-        println!("{}", result);
-        match name.as_str() {
-            "Asked" => {
-                println!("Asked");
-                let url = decode_url_params(&f).unwrap();
-                //let mr: u32 = reqwest::get(url).await?.text().await?.parse().unwrap();
-                //println!("mr: {}", mr);
-                // submit result
-
-                let addr = "0x7C963C6e754310CB2da119fAc2742BA0A70E5356"
-                    .parse::<Address>()
-                    .unwrap();
-
-                abigen!(
-                    SimpleContract,
-                    "./src/askv0.abi.json",
-                    event_derives(serde::Deserialize, serde::Serialize)
-                );
-                let id = f
-                    .params
-                    .iter()
-                    .find(|p| p.name == "id")
-                    .unwrap()
-                    .value
-                    .clone();
-                let id = match id {
-                    Token::Uint(content) => content,
-                    _ => {
-                        println!("invalid id");
-                        return Ok(());
-                    }
-                };
-                let data = ethabi::encode(&[ethabi::Token::Uint(U256::from(2))]);
-                // let data = ethabi::Token::Bytes(data);
-
-                //let contract = SimpleContract::new(addr, client.clone());
-                //let r = contract
-                //    .reply(U256::from(id), Bytes::from(data))
-                //    .send()
-                //    .await?
-                //    .await?;
-                //println!("r: {:#?}", r);
-
-                let file = File::open("./src/askv0.abi.json")?;
-                let abi: ethers::abi::Abi = serde_json::from_reader(file)?;
-                let wallet_a = MnemonicBuilder::<English>::default()
-                //.phrase("aisle genuine false door mouse sustain caught flock pyramid sister scan disease")
-                .phrase("glory usage happy lamp nephew holiday fury private various evolve buddy junk")
-                .build()?;
-                let http_client = Provider::<Http>::try_from("https://polygon-rpc.com").unwrap();
-                let http_client =
-                    SignerMiddleware::new(http_client, wallet_a.with_chain_id(137 as u64));
-                let (base_fee, _) = http_client.estimate_eip1559_fees(None).await?;
-                // create the contract object at the address
-                let contract = ethers::contract::Contract::new(addr, abi, http_client);
-
-                // Non-constant methods are executed via the `send()` call on the method builder.
-                println!("Calling `reply`...");
-                let call = contract.method::<_, ()>("reply", (id, Bytes::from(data)))?;
-                let eg = call.estimate_gas().await?;
-                println!("eg: {}", eg);
-                let receipt = call
-                    .gas(1000000u64)
-                    .gas_price(base_fee * 2)
-                    .send()
-                    .await?
-                    .await?;
-
-                // `await`ing on the pending transaction resolves to a transaction receipt
-                //let receipt = pending_tx.confirmations(6).await?;
-                println!("receipt: {:#?}", receipt);
-            }
-            "Replied" => {
-                println!("Replied");
-            }
-            "ReplyFailed" => {
-                println!(
-                    "ReplyFailed: {}",
-                    f.params
-                        .iter()
-                        .find(|p| p.name == "errmsg")
-                        .unwrap()
-                        .value
-                        .clone()
-                );
-            }
-            _ => {
-                println!("Unknown event");
-            }
-        }
+        handle_log(cfg, log).await?;
     }
-
+    println!("fetching events done!");
     Ok(())
+}
+
+async fn run(cfg: Config) {
+    println!("Start execute ...");
+    let r = execute(&cfg).await;
+    if r.is_err() {
+        println!("Execute error: {}", r.unwrap_err());
+    }
+    println!("End execute ...");
+}
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let opts = Opts::from_args();
+    println!("Using config file: {:?}", opts.cfg);
+    let cfg: Config = confy::load_path(opts.cfg.to_str().unwrap())?;
+    println!("Config: {:#?}", cfg.clone());
+    run(cfg.clone()).await;
+    let mut scheduler = AsyncScheduler::new();
+    scheduler
+        .every(cfg.oracle.interval.minutes())
+        .run(move || run(cfg.clone()));
+    // Manually run the scheduler forever
+    loop {
+        scheduler.run_pending().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
