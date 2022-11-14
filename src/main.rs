@@ -25,6 +25,7 @@ use structopt::StructOpt;
 use clokwerk::{AsyncScheduler, Job, TimeUnits};
 use std::time::Duration;
 
+
 // Define a struct called Opts
 #[derive(Debug, StructOpt)]
 struct Opts {
@@ -115,6 +116,8 @@ struct Network {
     chain_id: u64,
     oracle_addr: String,
     block_offset: u64,
+    gas_limit: u64,
+    gas_price: u64,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -168,12 +171,17 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
         .phrase(cfg.oracle.signer.as_str())
         .build()?;
 
-    let http_client = Provider::<Http>::try_from(&cfg.network.http_provider).unwrap();
+    let provider = Provider::<Http>::try_from(&cfg.network.http_provider).unwrap();
+    println!("connect to http provider {}", cfg.network.http_provider);
     let http_client =
-        SignerMiddleware::new(http_client, wallet.with_chain_id(cfg.network.chain_id));
-
-    let (base_fee, _) = http_client.estimate_eip1559_fees(None).await?;
-    println!("base fee: {}", base_fee);
+        SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
+    
+    let mut gas_price = http_client.get_gas_price().await?;
+    println!("gas price: {}", gas_price);
+    if cfg.network.gas_price > 0 {
+        println!("override gas price with {}", cfg.network.gas_price);
+        gas_price = cfg.network.gas_price.into();
+    }
 
     // create the contract object at the address
     let contract = ethers::contract::Contract::new(addr, abi, http_client);
@@ -181,12 +189,17 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
     // Non-constant methods are executed via the `send()` call on the method builder.
     println!("Calling `reply`...");
     let call = contract.method::<_, ()>("reply", (ask_id, Bytes::from(answer)))?;
-    //let eg = call.estimate_gas().await?;
-    //println!("eg: {}", eg);
+    let eg = call.estimate_gas().await?;
+    println!("eg: {}", eg);
+    let mut gas_limit = eg*10;
+    if cfg.network.gas_limit > 0 {
+        println!("override gas limit with {}", cfg.network.gas_limit);
+        gas_limit = cfg.network.gas_limit.into();
+    }
     println!("tx: {:?}", call.tx);
     let receipt = call
-        .gas(1000000u64)
-        .gas_price(base_fee * 2)
+        .gas(gas_limit)
+        .gas_price(gas_price)
         .send()
         .await?
         .await?;
@@ -248,11 +261,14 @@ async fn execute(cfg: &Config) -> Result<(), anyhow::Error> {
         .build()?;
     println!("Wallet: {}", wallet.address());
 
+    println!("connecting to {}", cfg.network.ws_provider);
     let provider = Provider::<Ws>::connect(cfg.network.ws_provider.as_str()).await?;
 
+    println!("new client with signer");
     let client = SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
     let client = Arc::new(client);
 
+    println!("get latest block");
     let last_block = client
         .get_block(BlockNumber::Latest)
         .await?
@@ -265,16 +281,14 @@ async fn execute(cfg: &Config) -> Result<(), anyhow::Error> {
     println!("from block: {}", from_block);
 
     let filter = Filter::new()
-        .from_block(3172348)
+        .from_block(from_block)
         .address(cfg.network.oracle_addr.as_str().parse::<Address>().unwrap());
 
-    println!("subscribing to events");
-    let mut stream = client.subscribe_logs(&filter).await?;
-
-    println!("fetching events...");
-    while let Some(log) = stream.next().await {
-        println!("log: {:#?}", log);
+    println!("fetching events ...");
+    let logs = client.get_logs(&filter).await?;
+    for log in logs {
         handle_log(cfg, log).await?;
+        println!("--------------------------------");
     }
     println!("fetching events done!");
     Ok(())
@@ -295,7 +309,6 @@ async fn main() -> Result<(), anyhow::Error> {
     println!("Using config file: {:?}", opts.cfg);
     let cfg: Config = confy::load_path(opts.cfg.to_str().unwrap())?;
     println!("Config: {:#?}", cfg.clone());
-    run(cfg.clone()).await;
     let mut scheduler = AsyncScheduler::new();
     scheduler
         .every(cfg.oracle.interval.minutes())
