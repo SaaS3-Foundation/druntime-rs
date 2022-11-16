@@ -105,7 +105,7 @@ fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
         .collect::<Vec<String>>()
         .join("&");
 
-    let url = "http://150.109.145.144:3301/saas3/web2/qatar2022/played?".to_string() + &url_suffix;
+    let url = "https://rpc.saas3.io:3301/saas3/web2/qatar2022/played?".to_string() + &url_suffix;
     Ok(url)
 }
 
@@ -221,15 +221,14 @@ async fn handle_log(cfg: &Config, log: Log) -> Result<(), anyhow::Error> {
             let url = decode_url_params(&e).unwrap();
             println!("url: {}", url);
 
-            // TODO
             // do http request
-            //let mr: u32 = reqwest::get(url).await?.text().await?.parse().unwrap();
-            //println!("mr: {}", mr);
+            let mr: u32 = reqwest::get(url).await?.text().await?.parse().unwrap();
+            println!("mr: {}", mr);
 
             let ask_id = decode_askid(e).unwrap();
             println!("ask_id: {}", ask_id);
             // encode reply payload
-            let answer = ethabi::encode(&[ethabi::Token::Uint(U256::from(2))]);
+            let answer = ethabi::encode(&[ethabi::Token::Uint(U256::from(mr))]);
             submit_answer(cfg, ask_id, answer).await?;
         }
         "Replied" => {
