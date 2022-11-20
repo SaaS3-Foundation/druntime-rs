@@ -10,6 +10,7 @@ use ethers::{
     abi::{AbiDecode, Tokenizable},
     prelude::*,
     solc::resolver::print,
+    types::transaction::eip2718::TypedTransaction,
     utils::keccak256,
 };
 use ethers_signers::{coins_bip39::English, MnemonicBuilder};
@@ -24,7 +25,6 @@ use structopt::StructOpt;
 // Scheduler, trait for .seconds(), .minutes(), etc., and trait with job scheduling methods
 use clokwerk::{AsyncScheduler, Job, TimeUnits};
 use std::time::Duration;
-
 
 // Define a struct called Opts
 #[derive(Debug, StructOpt)]
@@ -171,11 +171,11 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
         .phrase(cfg.oracle.signer.as_str())
         .build()?;
 
-    let provider = Provider::<Http>::try_from(&cfg.network.http_provider).unwrap();
     println!("connect to http provider {}", cfg.network.http_provider);
-    let http_client =
-        SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
-    
+    let provider = Provider::<Http>::try_from(&cfg.network.http_provider).unwrap();
+    println!("provider: {}", provider.get_chainid().await?);
+    let http_client = SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
+
     let mut gas_price = http_client.get_gas_price().await?;
     println!("gas price: {}", gas_price);
     if cfg.network.gas_price > 0 {
@@ -184,25 +184,41 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
     }
 
     // create the contract object at the address
-    let contract = ethers::contract::Contract::new(addr, abi, http_client);
+    let contract = ethers::contract::Contract::new(addr, abi, http_client.clone());
 
     // Non-constant methods are executed via the `send()` call on the method builder.
     println!("Calling `reply`...");
     let call = contract.method::<_, ()>("reply", (ask_id, Bytes::from(answer)))?;
     let eg = call.estimate_gas().await?;
     println!("eg: {}", eg);
-    let mut gas_limit = eg*10;
+    let mut gas_limit = eg * 10;
     if cfg.network.gas_limit > 0 {
         println!("override gas limit with {}", cfg.network.gas_limit);
         gas_limit = cfg.network.gas_limit.into();
     }
     println!("tx: {:?}", call.tx);
-    let receipt = call
-        .gas(gas_limit)
-        .gas_price(gas_price)
-        .send()
-        .await?
-        .await?;
+    let tx: TypedTransaction = TransactionRequest {
+        from: None,
+        to: call.tx.to().cloned(),
+        nonce: None,
+        value: None,
+        gas: Some(gas_limit),
+        gas_price: Some(gas_price),
+        data: Some(call.tx.data().unwrap().clone()),
+        chain_id: Some(cfg.network.chain_id.into()),
+    }
+    .into();
+    let pending_tx = http_client.send_transaction(tx, None).await?;
+    let receipt = pending_tx.confirmations(3).await?;
+
+    // === old ===
+    //    let receipt = call
+    //        .gas(gas_limit)
+    //        .gas_price(gas_price)
+    //        .send()
+    //        .await?
+    //        .await?;
+    // === old ===
 
     // `await`ing on the pending transaction resolves to a transaction receipt
     //let receipt = pending_tx.confirmations(6).await?;
@@ -262,6 +278,11 @@ async fn execute(cfg: &Config) -> Result<(), anyhow::Error> {
 
     println!("connecting to {}", cfg.network.ws_provider);
     let provider = Provider::<Ws>::connect(cfg.network.ws_provider.as_str()).await?;
+    println!("provider: {}", provider.get_chainid().await?);
+    assert_eq!(
+        provider.get_chainid().await?,
+        U256::from(cfg.network.chain_id)
+    );
 
     println!("new client with signer");
     let client = SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
