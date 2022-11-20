@@ -190,13 +190,13 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
     println!("Calling `reply`...");
     let call = contract.method::<_, ()>("reply", (ask_id, Bytes::from(answer)))?;
     let eg = call.estimate_gas().await?;
-    println!("eg: {}", eg);
+    println!("estimate gas: {}", eg);
     let mut gas_limit = eg * 10;
     if cfg.network.gas_limit > 0 {
         println!("override gas limit with {}", cfg.network.gas_limit);
         gas_limit = cfg.network.gas_limit.into();
     }
-    println!("tx: {:?}", call.tx);
+    println!("contract call tx: {:?}", call.tx);
     let tx: TypedTransaction = TransactionRequest {
         from: None,
         to: call.tx.to().cloned(),
@@ -208,10 +208,16 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
         chain_id: Some(cfg.network.chain_id.into()),
     }
     .into();
+
+    println!("tx: {:?}", tx);
+
     let pending_tx = http_client.send_transaction(tx, None).await?;
+
+    // `await`ing on the pending transaction resolves to a transaction receipt
     let receipt = pending_tx.confirmations(3).await?;
 
     // === old ===
+    // works with eth, polygon, mooben alpha
     //    let receipt = call
     //        .gas(gas_limit)
     //        .gas_price(gas_price)
@@ -220,8 +226,6 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
     //        .await?;
     // === old ===
 
-    // `await`ing on the pending transaction resolves to a transaction receipt
-    //let receipt = pending_tx.confirmations(6).await?;
     println!("receipt: {:#?}", receipt);
 
     Ok(())
