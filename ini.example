@@ -1,0 +1,16 @@
+title = "druntime cfg for production usage"
+
+[network]
+http_provider ="https://polygon-rpc.com"
+oracle_addr = "0x..."
+chain_id = 137
+period = 2 # in seconds
+# from_block and to_block are optional
+from_block = 35954898
+to_block = 35954898
+
+[oracle]
+abi = "./src/ask.abi.json"
+signer = "mnemonic words"
+# interval for polling the contract events in minutes
+interval = 1
