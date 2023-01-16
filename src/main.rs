@@ -1,7 +1,7 @@
 #![feature(let_chains)]
-use ::abi::ABI;
+use ::abi::{encode::str_chunk32_bytes, ABI};
 use anyhow::{anyhow, Ok};
-use ethabi::{Event, Hash};
+use ethabi::{ethereum_types::U256, Hash};
 use ethers::{
     prelude::*,
     types::transaction::eip2718::TypedTransaction,
@@ -76,7 +76,7 @@ fn identify_event(
     Err(anyhow!("No event found"))
 }
 
-fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
+fn decode_abi(log: &ethabi::Log) -> anyhow::Result<ABI> {
     let payload = log
         .params
         .iter()
@@ -89,7 +89,11 @@ fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
         _ => anyhow::bail!("Invalid payload"),
     };
 
-    let decoded_abi = ABI::decode_from_slice(&b, true).map_err(anyhow::Error::msg)?;
+    Ok(ABI::decode_from_slice(&b, true).map_err(anyhow::Error::msg)?)
+}
+
+fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
+    let decoded_abi = decode_abi(log)?;
     let url_suffix = decoded_abi
         .params
         .iter()
@@ -98,8 +102,7 @@ fn decode_url_params(log: &ethabi::Log) -> anyhow::Result<String> {
         .collect::<Vec<String>>()
         .join("&");
 
-    let url = "https://rpc.saas3.io:3301/saas3/web2/qatar2022/played?".to_string() + &url_suffix;
-    Ok(url)
+    Ok(url_suffix)
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -120,14 +123,25 @@ struct Oracle {
     signer: String,
     interval: u32,
 }
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+struct Web2 {
+    method: String,
+    url: String,
+    _path: String,
+    _type: String,
+    _times: u32,
+}
+
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 struct Config {
     title: Option<String>,
     network: Network,
     oracle: Oracle,
+    web2: Web2,
 }
 
-fn decode_askid(e: ethabi::Log) -> Result<U256, anyhow::Error> {
+fn decode_askid(e: ethabi::Log) -> Result<ethers::types::U256, anyhow::Error> {
     let id = e
         .params
         .iter()
@@ -142,7 +156,7 @@ fn decode_askid(e: ethabi::Log) -> Result<U256, anyhow::Error> {
             return Err(anyhow!("Invalid id"));
         }
     };
-    Ok(U256::from(id.as_usize()))
+    Ok(ethers::types::U256::from(id.as_usize()))
 }
 
 fn format_event(e: &ethabi::Log) -> String {
@@ -153,7 +167,11 @@ fn format_event(e: &ethabi::Log) -> String {
         .join("\n")
 }
 
-async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<(), anyhow::Error> {
+async fn submit_answer(
+    cfg: &Config,
+    ask_id: ethers::types::U256,
+    answer: Vec<u8>,
+) -> Result<(), anyhow::Error> {
     // SUBMIT
     let addr = cfg.network.oracle_addr.as_str().parse::<Address>().unwrap();
     println!("submitting answer to oracle {}", addr);
@@ -230,6 +248,151 @@ async fn submit_answer(cfg: &Config, ask_id: U256, answer: Vec<u8>) -> Result<()
     Ok(())
 }
 
+fn read_by_path(v: serde_json::Value, path: &str) -> anyhow::Result<serde_json::Value> {
+    let v = path
+        .split(".")
+        .fold(Ok(v), |v, p| {
+            println!("p: {}", p);
+
+            let v = v?
+                .get(p)
+                .ok_or(anyhow::anyhow!("failed to decode by path"))
+                .cloned();
+            v
+        })
+        .map_err(anyhow::Error::msg)?;
+
+    println!("path {} value {:#?}", path, v);
+
+    Ok(v)
+}
+
+fn encode_from_string_to_256(
+    s: String,
+    signed: bool,
+    _times: u32,
+) -> anyhow::Result<ethabi::Token> {
+    let is_signed = s.starts_with("-");
+    if is_signed && !signed {
+        // eg. try encode "-3" to u256
+        anyhow::bail!("number sign not match!")
+    }
+    let pos = s.find(".");
+    if pos != None {
+        // offset count
+        let y = s.len() - pos.unwrap() - 1;
+
+        if 10_u32.pow(y as u32) > _times {
+            anyhow::bail!("_times too small ");
+        }
+
+        // remove decimal point
+        let mut s = s.to_owned();
+        s.retain(|c| c != '.' && c != '-');
+
+        // alreay multiply by 10^y
+        let mut v = s.parse::<u64>().unwrap();
+
+        // times must >= 10^y
+        v = v * (_times / 10_u32.pow(y as u32)) as u64;
+
+        // encode to u256
+        if is_signed {
+            return Ok(ethabi::Token::Int(U256::from(v)));
+        } else {
+            return Ok(ethabi::Token::Uint(U256::from(v)));
+        }
+    } else {
+        // not a decimal number
+        let mut s = s.to_owned();
+        s.retain(|c| c != '-');
+
+        #[cfg(feature = "std")]
+        println!("s: {}", s);
+
+        if signed {
+            s.parse::<i64>()
+                .map(|x| ethabi::Token::Int(U256::from(x)))
+                .map_err(anyhow::Error::msg)
+        } else {
+            s.parse::<u64>()
+                .map(|x| ethabi::Token::Uint(U256::from(x)))
+                .map_err(anyhow::Error::msg)
+        }
+    }
+}
+
+async fn encode_answer(
+    v: serde_json::Value,
+    _type: &str,
+    _times: u32,
+) -> Result<ethabi::Token, anyhow::Error> {
+    match v {
+        serde_json::Value::Number(n) => {
+            return match _type {
+                "string" => Ok(ethabi::Token::String(n.to_string())),
+                "string32" => {
+                    let chunk = str_chunk32_bytes(&n.to_string()).map_err(anyhow::Error::msg)?;
+                    Ok(ethabi::Token::FixedBytes(chunk))
+                }
+                "uint256" => Ok(encode_from_string_to_256(n.to_string(), false, _times)?),
+                "int256" => Ok(encode_from_string_to_256(n.to_string(), true, _times)?),
+                _ => anyhow::bail!("invalid _type"),
+            };
+        }
+        serde_json::Value::String(s) => {
+            println!("String: {}", s);
+
+            return match _type {
+                "string" => Ok(ethabi::Token::String(s)),
+                "string32" => {
+                    let chunk = str_chunk32_bytes(&s.to_string()).map_err(anyhow::Error::msg)?;
+                    Ok(ethabi::Token::FixedBytes(chunk))
+                }
+                "uint256" => Ok(encode_from_string_to_256(s, false, _times)?),
+                "int256" => Ok(encode_from_string_to_256(s, true, _times)?),
+                _ => anyhow::bail!("invalid type!"),
+            };
+        }
+        _ => {
+            anyhow::bail!("not a number or string!");
+        }
+    }
+}
+
+async fn get_answer(
+    cfg: &Config,
+    url: String,
+    _type: String,
+    _path: String,
+    _times: u32,
+) -> Result<ethabi::Token, anyhow::Error> {
+    match cfg.web2.method.to_ascii_uppercase().as_str() {
+        "GET" => {
+            // do http request
+            let res = reqwest::get(url).await?.text().await?;
+            println!("{}", res);
+
+            let root = serde_json::from_str::<serde_json::Value>(&res)
+                .or(Err(anyhow!("failed to decode response json!")))?;
+
+            println!("Got response {:#?}", root);
+
+            let mut v = root.clone();
+            if _path != "" {
+                v = read_by_path(root, &_path)?;
+            } // no path, use the root path
+
+            if v.is_array() || v.is_null() || v.is_object() {
+                // we only support number, string, bool
+                return Err(anyhow!("invald root value"));
+            }
+            return encode_answer(v, &_type, _times).await;
+        }
+        _ => Err(anyhow!("http method not support yet!")),
+    }
+}
+
 async fn handle_log(cfg: &Config, log: Log) -> Result<(), anyhow::Error> {
     let (name, e) = identify_event(
         &cfg.oracle.abi,
@@ -241,18 +404,54 @@ async fn handle_log(cfg: &Config, log: Log) -> Result<(), anyhow::Error> {
 
     match name.as_str() {
         "Asked" => {
-            let url = decode_url_params(&e).unwrap();
+            let url_suffix = decode_url_params(&e).unwrap();
+            let decoded_abi = decode_abi(&e)?;
+            // path is optional, if not set, we will use the root path
+            let _path = decoded_abi
+                .params
+                .iter()
+                .find(|param| param.get_name() == "_path")
+                .get_or_insert(&::abi::Param::String {
+                    name: "_path".to_string(),
+                    value: cfg.web2._path.to_string(),
+                })
+                .get_value();
+
+            // _type is necessary
+            let _type = decoded_abi
+                .params
+                .iter()
+                .find(|param| param.get_name() == "_type")
+                .get_or_insert(&::abi::Param::String {
+                    name: "_type".to_string(),
+                    value: cfg.web2._type.to_string(),
+                })
+                //.ok_or(anyhow!("type not set"))?
+                .get_value();
+
+            // _times is only necessary for float number data
+            let _times = decoded_abi
+                .params
+                .iter()
+                .find(|param| param.get_name() == "_times")
+                .get_or_insert(&::abi::Param::String {
+                    name: "_times".to_string(),
+                    value: cfg.web2._times.to_string(),
+                })
+                .get_value()
+                .parse::<u32>()
+                .map_err(anyhow::Error::msg)?;
+
+            let url = cfg.web2.url.clone() + &url_suffix;
             println!("url: {}", url);
-            // do http request
-            let mr: u32 = reqwest::get(url).await?.text().await?.parse().unwrap();
-            println!("mr: {}", mr);
+
+            let answer = get_answer(cfg, url, _path, _type, _times).await?;
 
             let ask_id = decode_askid(e).unwrap();
             println!("ask_id: {}", ask_id);
 
             // encode reply payload
-            let answer =
-                ethabi::encode(&[ethabi::Token::Uint(ethabi::ethereum_types::U256::from(mr))]);
+            let answer = ethabi::encode(&[answer]);
             submit_answer(cfg, ask_id, answer).await?;
         }
         "Replied" => {
@@ -289,7 +488,7 @@ async fn execute(cfg: &Config) -> Result<(), anyhow::Error> {
     println!("provider: {}", provider.get_chainid().await?);
     assert_eq!(
         provider.get_chainid().await?,
-        U256::from(cfg.network.chain_id)
+        ethers::types::U256::from(cfg.network.chain_id)
     );
 
     println!("new client with signer");
