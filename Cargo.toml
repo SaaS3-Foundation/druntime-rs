@@ -12,8 +12,8 @@ eyre = "0.6"
 ethabi = "17.2.0"
 anyhow = "1.0.51"
 hex = "0.4"
-#abi = { git = "https://github.com/SaaS3-Foundation/abi.git" }
-abi = { path = "../abi" }
+abi = { git = "https://github.com/SaaS3-Foundation/abi.git" }
+#abi = { path = "../abi" }
 reqwest = { version = "0.11", features = ["json"] }
 ethers-signers = { version = "1.0.0" }
 serde = { version = "1.0.130", features = ["derive"] }

@@ -7,7 +7,7 @@ use ethers::{
     types::transaction::eip2718::TypedTransaction,
     //utils::keccak256,
 };
-use ethers_signers::{coins_bip39::English, MnemonicBuilder};
+use ethers_signers::{ coins_bip39::English, MnemonicBuilder};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -179,16 +179,25 @@ async fn submit_answer(
     let file = File::open(&cfg.oracle.abi)?;
     let abi: ethers::abi::Abi = serde_json::from_reader(file)?;
 
+    // if (cfg.oracle.signer.as_str().split(" "))
+
     let wallet = MnemonicBuilder::<English>::default()
         .phrase(cfg.oracle.signer.as_str())
         .build()?;
+
+    
 
     println!("connect to http provider {}", cfg.network.http_provider);
     let provider = Provider::<Http>::try_from(&cfg.network.http_provider).unwrap();
     println!("provider: {}", provider.get_chainid().await?);
 
-    let http_client = SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
-
+    let http_client = SignerMiddleware::new(
+        provider, 
+        wallet.with_chain_id(cfg.network.chain_id)
+    );
+    let accounts = http_client.get_accounts().await?;
+    println!("{:#?}", accounts);
+    // http_client.get_balance(from, block)
     let mut gas_price = http_client.get_gas_price().await?;
     println!("gas price: {}", gas_price);
 
@@ -201,7 +210,7 @@ async fn submit_answer(
     let contract = ethers::contract::Contract::new(addr, abi, http_client.clone());
 
     // Non-constant methods are executed via the `send()` call on the method builder.
-    println!("building `reply` tx...");
+    println!("building `reply` tx... ask_id: {}", ask_id);
     let call = contract.method::<_, ()>("reply", (ask_id, Bytes::from(answer)))?;
 
     let eg = call.estimate_gas().await?;
@@ -249,6 +258,7 @@ async fn submit_answer(
 }
 
 fn read_by_path(v: serde_json::Value, path: &str) -> anyhow::Result<serde_json::Value> {
+    println!("path: {}", path);
     let v = path
         .split(".")
         .fold(Ok(v), |v, p| {
@@ -379,6 +389,7 @@ async fn get_answer(
             println!("Got response {:#?}", root);
 
             let mut v = root.clone();
+            println!("_path11: {}", _path);
             if _path != "" {
                 v = read_by_path(root, &_path)?;
             } // no path, use the root path
@@ -387,6 +398,7 @@ async fn get_answer(
                 // we only support number, string, bool
                 return Err(anyhow!("invald root value"));
             }
+            println!("value: {}", v);
             return encode_answer(v, &_type, _times).await;
         }
         _ => Err(anyhow!("http method not support yet!")),
@@ -417,6 +429,8 @@ async fn handle_log(cfg: &Config, log: Log) -> Result<(), anyhow::Error> {
                 })
                 .get_value();
 
+            println!("_path::::, {}", _path);
+
             // _type is necessary
             let _type = decoded_abi
                 .params
@@ -442,10 +456,17 @@ async fn handle_log(cfg: &Config, log: Log) -> Result<(), anyhow::Error> {
                 .parse::<u32>()
                 .map_err(anyhow::Error::msg)?;
 
-            let url = cfg.web2.url.clone() + &url_suffix;
+            let url = cfg.web2.url.clone() + "?" + &url_suffix;
             println!("url: {}", url);
-
-            let answer = get_answer(cfg, url, _path, _type, _times).await?;
+            
+            let answer = get_answer(
+                cfg,
+                url,
+                cfg.web2._type.clone(),
+                cfg.web2._path.clone(),
+                _times,
+            )
+            .await?;
 
             let ask_id = decode_askid(e).unwrap();
             println!("ask_id: {}", ask_id);
