@@ -7,7 +7,7 @@ use ethers::{
     types::transaction::eip2718::TypedTransaction,
     //utils::keccak256,
 };
-use ethers_signers::{ coins_bip39::English, MnemonicBuilder};
+use ethers_signers::{coins_bip39::English, MnemonicBuilder};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -185,16 +185,11 @@ async fn submit_answer(
         .phrase(cfg.oracle.signer.as_str())
         .build()?;
 
-    
-
     println!("connect to http provider {}", cfg.network.http_provider);
     let provider = Provider::<Http>::try_from(&cfg.network.http_provider).unwrap();
     println!("provider: {}", provider.get_chainid().await?);
 
-    let http_client = SignerMiddleware::new(
-        provider, 
-        wallet.with_chain_id(cfg.network.chain_id)
-    );
+    let http_client = SignerMiddleware::new(provider, wallet.with_chain_id(cfg.network.chain_id));
     let accounts = http_client.get_accounts().await?;
     println!("{:#?}", accounts);
     // http_client.get_balance(from, block)
@@ -458,7 +453,7 @@ async fn handle_log(cfg: &Config, log: Log) -> Result<(), anyhow::Error> {
 
             let url = cfg.web2.url.clone() + "?" + &url_suffix;
             println!("url: {}", url);
-            
+
             let answer = get_answer(
                 cfg,
                 url,
